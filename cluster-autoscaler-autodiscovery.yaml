@@ -11,7 +11,7 @@ metadata:
     eks.amazonaws.com/role-arn: "${CLUSTER_AUTOSCALER_ROLE_ARN}"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: ClusterRolgit
 metadata:
   name: cluster-autoscaler
   labels:

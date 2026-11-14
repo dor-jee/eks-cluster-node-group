@@ -1,93 +1,117 @@
 # eks-cluster-node-group
 
+![AWS](https://img.shields.io/badge/AWS-EKS-FF9900?logo=amazonaws&logoColor=white)
+![Kubernetes](https://img.shields.io/badge/Kubernetes-Cluster%20Autoscaler-326CE5?logo=kubernetes&logoColor=white)
+![CloudFormation](https://img.shields.io/badge/IaC-CloudFormation%20(VPC%20only)-FF4F8B?logo=amazonaws&logoColor=white)
+![Region](https://img.shields.io/badge/region-eu--central--2%20(Z%C3%BCrich)-informational)
 
 
-## Getting started
+Teams running variable workloads on Kubernetes need capacity that grows and shrinks with demand — manually sized clusters either waste money sitting idle or fall over under load. Built as a practice project to learn how a production-style EKS setup fits together end to end, this repository stands up a minimal but complete platform: a dedicated VPC, a managed node group, and a Cluster Autoscaler that adds nodes when pods can't schedule and removes them once load drops, with AWS access through OIDC rather than static credentials.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Every component — network, IAM, cluster, autoscaler — was configured explicitly through the console and kubectl, without IaC, so each decision and its tradeoff had to be understood rather than inherited from a module.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+Sole engineer: designed, built and documented the whole stack; documentation drafted with AI assistance and every claim verified against the actual build.
 
-## Add your files
+**What you get:** an EKS control plane in a dedicated VPC with 4 subnets (public and private), a managed node group of 2 `t3.small` On-Demand nodes, a Cluster Autoscaler wired to AWS through OIDC, and a sample nginx deployment exposed through a `LoadBalancer` service.
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+**Verified state:** 2 of 2 nodes `Ready`, the nginx pod `1/1 Running`, the Classic Load Balancer reports 2 of 2 instances in service, the autoscaler pod was still `Running` with 0 restarts after 6h15m, and a full scale-up/down cycle was verified (see [Infrastructure](#infrastructure)).
 
+---
+
+## Architecture
+
+
+```mermaid
+flowchart LR
+    user([kubectl / browser]) --> elb[Classic Load Balancer<br/>internet-facing]
+    user --> api[EKS API endpoint<br/>public + private]
+
+    subgraph vpc[eks-worker-node-vpc-stack-VPC]
+        elb --> nginx[nginx pods]
+        subgraph nodes[Node group: eks-node-group]
+            nginx
+            ca[cluster-autoscaler<br/>kube-system]
+        end
+    end
+
+    api --> cp[EKS control plane<br/>eks-cluster-test]
+    cp --- nodes
+    ca -- OIDC / sts.amazonaws.com --> iam[IAM role<br/>EKSServiceAccountRole]
+    iam --> asg[EC2 Auto Scaling group]
+    cp --> obs[CloudWatch + Prometheus metrics]
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/cloudbuildops/eks-cluster-node-group.git
-git branch -M main
-git push -uf origin main
+
+---
+
+## Tech stack
+
+| Component | Tool | Why |
+|---|---|---|
+| Kubernetes control plane | Amazon EKS | Managed control plane, no etcd or API server to operate |
+| Networking | AWS VPC via CloudFormation template | Default VPC is not suited for EKS; the AWS template gives public and private subnets out of the box |
+| Worker nodes | EKS managed node group (Amazon Linux 2023, `t3.small`, On-Demand) | One node group object instead of creating each EC2 instance by hand |
+| Autoscaling | Kubernetes Cluster Autoscaler | Scales the node group up and down through the AWS Auto Scaling API |
+| Auth to AWS | IAM OIDC identity provider + web identity role | Gives the autoscaler temporary credentials without static keys |
+| Ingress to the app | Kubernetes `Service` of type `LoadBalancer` | Provisions an internet-facing Classic Load Balancer |
+| Observability | CloudWatch, Prometheus metrics | Enabled by checkbox at cluster creation; not actively used |
+| CLI | `aws`, `kubectl` | Cluster access and deployment |
+
+---
+
+## Quick start
+
+Everything below was done in the AWS Management Console unless a command is shown.
+
+
+### Prerequisites
+
+- AWS account with permission to create IAM roles, VPC stacks and EKS clusters
+- `aws` CLI configured (`aws configure list` shows the active region)
+- `kubectl`
+
+### Repository contents
+
+```bash
+git clone https://gitlab.com/cloudbuildops/eks-cluster-node-group.git
 ```
 
-## Integrate with your tools
+| File | Purpose |
+|---|---|
+| `cluster-autoscaler-autodiscovery.yaml` | ServiceAccount, RBAC (ClusterRole, Role and bindings) and Deployment for the Cluster Autoscaler |
+| `custom-policy.json` | IAM policy attached to the autoscaler role |
+| `nginx-config.yaml` | Sample nginx Deployment and `LoadBalancer` Service |
 
-* [Set up project integrations](https://gitlab.com/cloudbuildops/eks-cluster-node-group/-/settings/integrations)
+### 1. Create the EKS cluster IAM role
 
-## Collaborate with your team
+IAM is global, not regional.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+1. IAM > Access Management > Roles > **Create role**
+2. Trusted entity type: **AWS service**
+3. Use case: **EKS**, then **EKS - Cluster** (not "EKS - Service")
+4. Role name used here: `eks-cluster-role`
 
-## Test and Deploy
+<img src="screenshots/01-iam-eks-cluster-role.png" alt="IAM role for the EKS cluster: AWS service, EKS - Cluster" width="800">
 
-Use the built-in continuous integration in GitLab.
+For this role type the console requires the AWS managed policy `AmazonEKSClusterPolicy`, and it is the only policy attached.
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+<img src="screenshots/01-iam-cluster-role-permissions.png" alt="Add permissions step: AmazonEKSClusterPolicy" width="800">
 
-***
+### 2. Create the VPC for the worker nodes
 
-# Editing this README
+Use the AWS CloudFormation template for public and private subnets from the [EKS user guide](https://docs.aws.amazon.com/eks/latest/userguide/creating-a-vpc.html).
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+1. CloudFormation > **Create stack** > choose an existing template
+2. Template source: Amazon S3 URL, using `https://s3.us-west-2.amazonaws.com/amazon-eks/cloudformation/2020-10-29/amazon-eks-vpc-private-subnets.yaml`
+3. Stack name used here: `eks-worker-node-vpc-stack`
+4. After creation, open the **Outputs** tab and note `SecurityGroups`, `SubnetIds` and `VpcId`. You need them for the cluster.
 
-## Suggestions for a good README
+<img src="screenshots/02-cloudformation-create-stack.png" alt="CloudFormation create stack: existing template from an S3 URL" width="800">
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+The parameters are a `192.168.0.0/16` VPC with two public and two private `/18` subnets (full table under [Infrastructure](#infrastructure)).
 
-## Name
-Choose a self-explaining name for your project.
+<img src="screenshots/02-cloudformation-stack-parameters.png" alt="Stack details: name eks-worker-node-vpc-stack and CIDR parameters" width="800">
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+The stack ends in `CREATE_COMPLETE`, and its Outputs tab lists the 3 values the cluster needs.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+<img src="screenshots/02-cloudformation-outputs.png" alt="CloudFormation Outputs: SecurityGroups, SubnetIds, VpcId" width="800">
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
